@@ -1,6 +1,6 @@
 import { VoiceConnection, VoiceReceiver, EndBehaviorType } from '@discordjs/voice';
 import { User } from 'discord.js';
-import { createWriteStream, createReadStream, mkdirSync, existsSync, unlinkSync, statSync } from 'fs';
+import { createWriteStream, createReadStream, mkdirSync, existsSync, unlinkSync, statSync, readFileSync } from 'fs';
 import { pipeline, PassThrough } from 'stream';
 import { promisify } from 'util';
 import * as prism from 'prism-media';
@@ -14,7 +14,11 @@ export class AudioProcessor {
   private audioDir = './audio_recordings';
   private modelPath = path.join(__dirname, '..', 'models', 'vosk-model-small-en-us-0.15');
   private processingQueue: Set<string> = new Set();
-  private readonly MAX_CONCURRENT = 3;
+  private readonly MAX_CONCURRENT = 5;
+  private readonly MIN_AUDIO_BYTES = 2048;
+  private readonly MIN_AUDIO_DURATION_MS = 500;
+  private readonly PROCESSING_TIMEOUT_MS = 15000;
+  private readonly MIN_ENERGY = 500;
 
   constructor() {
     // Check if model exists
@@ -48,10 +52,18 @@ export class AudioProcessor {
     this.processingQueue.add(processingKey);
     console.log(`🎧 Capturing audio from ${user.username}`);
 
+    // Add timeout to auto-cleanup stuck processing
+    const timeoutId: any = setTimeout(() => {
+      if (this.processingQueue.has(processingKey)) {
+        console.log(`⏱️  Processing timeout for ${user.username}, cleaning up`);
+        this.processingQueue.delete(processingKey);
+      }
+    }, this.PROCESSING_TIMEOUT_MS);
+
     const opusStream = receiver.subscribe(user.id, {
       end: {
         behavior: EndBehaviorType.AfterSilence,
-        duration: 2000, // Increased to capture longer phrases
+        duration: 3000, // Increased to capture complete sentences
       },
     });
 
@@ -72,12 +84,29 @@ export class AudioProcessor {
 
       // Check if file has meaningful content
       const stats = statSync(filename);
-      console.log(`📊 Audio file size: ${stats.size} bytes`);
+      const durationMs = (stats.size / 192000) * 1000; // Approximate duration (48kHz, 2ch, 16bit)
 
-      if (stats.size < 512) {
-        console.log(`⚠️  Audio too short, skipping`);
+      console.log(`📊 Audio: ${stats.size} bytes (~${durationMs.toFixed(0)}ms)`);
+
+      if (stats.size < this.MIN_AUDIO_BYTES) {
+        console.log(`⚠️  Audio too small (< ${this.MIN_AUDIO_BYTES} bytes), skipping`);
         unlinkSync(filename);
-        this.processingQueue.delete(processingKey);
+        return;
+      }
+
+      if (durationMs < this.MIN_AUDIO_DURATION_MS) {
+        console.log(`⚠️  Audio too short (< ${this.MIN_AUDIO_DURATION_MS}ms), skipping`);
+        unlinkSync(filename);
+        return;
+      }
+
+      // Check audio energy to filter out silence/noise
+      const energy = this.calculateAudioEnergy(filename);
+      console.log(`🔊 Audio energy: ${energy.toFixed(0)} RMS`);
+
+      if (energy < this.MIN_ENERGY) {
+        console.log(`⚠️  Audio energy too low (likely silence/noise), skipping`);
+        unlinkSync(filename);
         return;
       }
 
@@ -117,6 +146,7 @@ export class AudioProcessor {
         }
       } catch {}
     } finally {
+      clearTimeout(timeoutId);
       this.processingQueue.delete(processingKey);
     }
   }
@@ -216,6 +246,18 @@ export class AudioProcessor {
     // Serialize transcription to prevent concurrent Vosk access
     const result = await (this.transcriptionLock = this.transcriptionLock.then(() => transcribe()));
     return result;
+  }
+
+  private calculateAudioEnergy(filename: string): number {
+    const buffer = readFileSync(filename);
+    const samples = new Int16Array(buffer.buffer, buffer.byteOffset, buffer.length / 2);
+
+    let sumSquares = 0;
+    for (let i = 0; i < samples.length; i++) {
+      sumSquares += samples[i] * samples[i];
+    }
+
+    return Math.sqrt(sumSquares / samples.length); // RMS
   }
 
   destroy(): void {
