@@ -27,10 +27,9 @@ A Discord bot that monitors voice channels for sports talk and kicks users who v
 
 - **Node.js 18 or higher**
 - **FFmpeg** (required for audio processing)
-  - Ubuntu/Debian: `sudo apt-get install ffmpeg`
-  - macOS: `brew install ffmpeg`
-  - Windows: Download from [ffmpeg.org](https://ffmpeg.org/download.html)
-- **unzip** utility (for extracting the model)
+  - **Windows**: `winget install Gyan.FFmpeg` (then restart your terminal)
+  - **macOS**: `brew install ffmpeg`
+  - **Ubuntu/Debian**: `sudo apt-get install ffmpeg`
 - A Discord Bot Token ([Create one here](https://discord.com/developers/applications))
 
 ### Installation
@@ -46,12 +45,16 @@ cd no-sports-zone
 npm install
 ```
 
+This will automatically check if FFmpeg is installed. If not, you'll see instructions for your platform.
+
 3. Download the Vosk speech recognition model (~40MB):
 ```bash
 npm run setup
 ```
 
 This will automatically download the English language model. It only needs to be done once.
+
+> **Note**: You can run `npm run check` at any time to verify your system has all required dependencies.
 
 4. Create a `.env` file from the example:
 ```bash
@@ -179,9 +182,15 @@ The bot needs these Discord permissions:
 - Bot cannot kick server administrators or owners
 
 **Poor transcription accuracy:**
-- The small model prioritizes speed over accuracy
-- For better accuracy, you can download larger Vosk models from [alphacephei.com/vosk/models](https://alphacephei.com/vosk/models)
-- Update the model path in `src/audioProcessor.ts:15`
+- The small model (~40MB) prioritizes speed over accuracy
+- For **significantly better accuracy**, download a larger model:
+  1. Visit [alphacephei.com/vosk/models](https://alphacephei.com/vosk/models)
+  2. Download `vosk-model-en-us-0.22` (~1.8GB) or `vosk-model-en-us-0.42-gigaspeech` (~2.3GB)
+  3. Extract it to the `models/` directory
+  4. Update the model path in [src/audioProcessor.ts:15](src/audioProcessor.ts#L15)
+  5. Change: `'vosk-model-small-en-us-0.15'` → `'vosk-model-en-us-0.22'`
+
+  The larger models provide **much better** recognition of casual speech and sports terminology.
 
 ## System Requirements
 

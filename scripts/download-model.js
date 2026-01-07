@@ -1,7 +1,7 @@
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const AdmZip = require('adm-zip');
 
 const MODEL_URL = 'https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip';
 const MODEL_DIR = path.join(__dirname, '..', 'models');
@@ -43,8 +43,9 @@ https.get(MODEL_URL, (response) => {
     console.log('\n\n📂 Extracting model...');
 
     try {
-      // Extract the zip file
-      execSync(`unzip -q "${MODEL_ZIP}" -d "${MODEL_DIR}"`, { stdio: 'inherit' });
+      // Extract the zip file using adm-zip (cross-platform)
+      const zip = new AdmZip(MODEL_ZIP);
+      zip.extractAllTo(MODEL_DIR, true);
 
       // Clean up zip file
       fs.unlinkSync(MODEL_ZIP);

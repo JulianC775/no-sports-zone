@@ -18,7 +18,7 @@ export class AudioProcessor {
   private readonly MIN_AUDIO_BYTES = 2048;
   private readonly MIN_AUDIO_DURATION_MS = 500;
   private readonly PROCESSING_TIMEOUT_MS = 15000;
-  private readonly MIN_ENERGY = 500;
+  private readonly MIN_ENERGY = 100; // Lowered from 500 to capture quieter speech
 
   constructor() {
     // Check if model exists
@@ -63,7 +63,7 @@ export class AudioProcessor {
     const opusStream = receiver.subscribe(user.id, {
       end: {
         behavior: EndBehaviorType.AfterSilence,
-        duration: 3000, // Increased to capture complete sentences
+        duration: 1000, // 1 second of silence to end capture (was 3000)
       },
     });
 
@@ -115,7 +115,8 @@ export class AudioProcessor {
       const text = await this.transcribeAudio(filename);
 
       if (text && text.trim().length > 0) {
-        console.log(`[${user.username}]: ${text}`);
+        console.log(`\n💬 [${user.username}]: "${text}"`);
+        console.log(`   Length: ${text.length} chars\n`);
         onTranscription(user.id, user.username, text);
       } else {
         console.log(`❌ No transcription for ${user.username} (empty or unclear)`);
@@ -207,11 +208,10 @@ export class AudioProcessor {
             console.log(`   📦 Processed ${chunksProcessed} audio chunks`);
             try {
               if (recognizer) {
-                const finalResultStr = recognizer.finalResult();
-                console.log(`   🔍 Final result: ${finalResultStr?.substring(0, 100)}`);
-                if (finalResultStr && finalResultStr !== '[object Object]') {
-                  const finalResult = JSON.parse(finalResultStr);
-                  if (finalResult.text) {
+                const finalResult = recognizer.finalResult();
+                console.log(`   🔍 Final result: ${JSON.stringify(finalResult)?.substring(0, 100)}`);
+                if (finalResult !== null && typeof finalResult === 'object') {
+                  if ('text' in finalResult && typeof finalResult.text === 'string') {
                     transcription += finalResult.text;
                   }
                 }
