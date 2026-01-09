@@ -1,8 +1,9 @@
 import { VoiceConnection, VoiceReceiver, EndBehaviorType } from '@discordjs/voice';
 import { User } from 'discord.js';
-import { createWriteStream, createReadStream, mkdirSync, existsSync, unlinkSync, statSync, readFileSync } from 'fs';
-import { pipeline, PassThrough } from 'stream';
+import { createWriteStream, mkdirSync, existsSync, unlinkSync, statSync, readFileSync } from 'fs';
+import { pipeline } from 'stream';
 import { promisify } from 'util';
+import { spawn } from 'child_process';
 import * as prism from 'prism-media';
 import * as vosk from 'vosk';
 import * as path from 'path';
@@ -12,7 +13,7 @@ const pipelineAsync = promisify(pipeline);
 export class AudioProcessor {
   private model: vosk.Model;
   private audioDir = './audio_recordings';
-  private modelPath = path.join(__dirname, '..', 'models', 'vosk-model-small-en-us-0.15');
+  private modelPath = path.join(__dirname, '..', 'models', 'vosk-model-en-us-0.22-lgraph');
   private processingQueue: Set<string> = new Set();
   private readonly MAX_CONCURRENT = 5;
   private readonly MIN_AUDIO_BYTES = 2048;
@@ -167,69 +168,116 @@ export class AudioProcessor {
             sampleRate: 16000
           });
 
-          // Read the PCM file and process it
-          const audioStream = createReadStream(filename);
-          const resampler = new prism.FFmpeg({
-            args: [
-              '-f', 's16le',
-              '-ar', '48000',
-              '-ac', '2',
-              '-i', 'pipe:0',
-              '-f', 's16le',
-              '-ar', '16000',
-              '-ac', '1',
-              'pipe:1'
-            ]
-          });
+          // Use FFmpeg to convert to 16kHz mono and save to temp file
+          const convertedFile = `${filename}.converted.pcm`;
+
+          const ffmpegProcess = spawn('ffmpeg', [
+            '-f', 's16le',
+            '-ar', '48000',
+            '-ac', '2',
+            '-i', filename,
+            '-f', 's16le',
+            '-ar', '16000',
+            '-ac', '1',
+            convertedFile,
+            '-y' // Overwrite output file
+          ]);
 
           let transcription = '';
 
-          audioStream.pipe(resampler);
-
-          let chunksProcessed = 0;
-          resampler.on('data', (chunk: Buffer) => {
-            try {
-              chunksProcessed++;
-              if (recognizer && recognizer.acceptWaveform(chunk)) {
-                const resultStr = recognizer.result();
-                if (resultStr && resultStr !== '[object Object]') {
-                  const result = JSON.parse(resultStr);
-                  if (result.text) {
-                    transcription += result.text + ' ';
-                  }
-                }
-              }
-            } catch (e) {
-              // Ignore parse errors
+          ffmpegProcess.on('error', (err) => {
+            console.log(`   ⚠️  FFmpeg spawn error: ${err.message}`);
+            if (recognizer) {
+              recognizer.free();
+              recognizer = null;
             }
+            reject(err);
           });
 
-          resampler.on('end', () => {
-            console.log(`   📦 Processed ${chunksProcessed} audio chunks`);
+          ffmpegProcess.stderr.on('data', (data) => {
+            // FFmpeg outputs to stderr, ignore it unless we need to debug
+            // console.log(`FFmpeg: ${data.toString()}`);
+          });
+
+          ffmpegProcess.on('close', (code) => {
+            if (code !== 0) {
+              console.log(`   ⚠️  FFmpeg exited with code ${code}`);
+              if (recognizer) {
+                recognizer.free();
+                recognizer = null;
+              }
+              resolve('');
+              return;
+            }
+            // Now read the converted file and process it with Vosk
             try {
+              if (!existsSync(convertedFile)) {
+                console.log(`   ⚠️  Converted file not created`);
+                resolve('');
+                return;
+              }
+
+              const audioData = readFileSync(convertedFile);
+              console.log(`   📦 Reading ${audioData.length} bytes of converted audio`);
+
+              // Process in chunks
+              const chunkSize = 8192;
+              let offset = 0;
+              let chunksProcessed = 0;
+
+              while (offset < audioData.length) {
+                const end = Math.min(offset + chunkSize, audioData.length);
+                const chunk = audioData.slice(offset, end);
+                chunksProcessed++;
+
+                if (recognizer && recognizer.acceptWaveform(chunk)) {
+                  const resultStr = recognizer.result();
+                  if (resultStr && resultStr !== '[object Object]') {
+                    const result = JSON.parse(resultStr);
+                    if (result.text) {
+                      transcription += result.text + ' ';
+                    }
+                  }
+                }
+                offset = end;
+              }
+
+              console.log(`   📦 Processed ${chunksProcessed} audio chunks`);
+
+              // Get final result
               if (recognizer) {
                 const finalResult = recognizer.finalResult();
                 console.log(`   🔍 Final result: ${JSON.stringify(finalResult)?.substring(0, 100)}`);
                 if (finalResult !== null && typeof finalResult === 'object') {
-                  if ('text' in finalResult && typeof finalResult.text === 'string') {
-                    transcription += finalResult.text;
+                  const result = finalResult as Record<string, any>;
+                  if ('text' in result && typeof result.text === 'string') {
+                    transcription += result.text;
                   }
                 }
                 recognizer.free();
                 recognizer = null;
               }
-            } catch (e) {
-              console.log(`   ⚠️  Parse error: ${e}`);
-            }
-            resolve(transcription.trim());
-          });
 
-          resampler.on('error', (error) => {
-            if (recognizer) {
-              recognizer.free();
-              recognizer = null;
+              // Clean up converted file
+              try {
+                unlinkSync(convertedFile);
+              } catch {}
+
+              resolve(transcription.trim());
+            } catch (e: any) {
+              console.log(`   ⚠️  Processing error: ${e.message}`);
+              if (recognizer) {
+                recognizer.free();
+                recognizer = null;
+              }
+              // Clean up converted file
+              try {
+                if (existsSync(convertedFile)) {
+                  unlinkSync(convertedFile);
+                }
+              } catch {}
+              resolve('');
             }
-            reject(error);
           });
         } catch (error) {
           if (recognizer) {

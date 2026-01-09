@@ -3,10 +3,10 @@ const fs = require('fs');
 const path = require('path');
 const AdmZip = require('adm-zip');
 
-const MODEL_URL = 'https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip';
+const MODEL_URL = 'https://alphacephei.com/vosk/models/vosk-model-en-us-0.22-lgraph.zip';
 const MODEL_DIR = path.join(__dirname, '..', 'models');
 const MODEL_ZIP = path.join(MODEL_DIR, 'model.zip');
-const MODEL_NAME = 'vosk-model-small-en-us-0.15';
+const MODEL_NAME = 'vosk-model-en-us-0.22-lgraph';
 
 console.log('📦 Setting up Vosk speech recognition model...\n');
 
@@ -21,8 +21,8 @@ if (fs.existsSync(path.join(MODEL_DIR, MODEL_NAME))) {
   process.exit(0);
 }
 
-console.log('⬇️  Downloading Vosk model (approximately 40MB)...');
-console.log('   This may take a few minutes...\n');
+console.log('⬇️  Downloading Vosk model (approximately 128MB)...');
+console.log('   This may take several minutes...\n');
 
 const file = fs.createWriteStream(MODEL_ZIP);
 

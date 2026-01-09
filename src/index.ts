@@ -241,18 +241,19 @@ class NoSportsZoneBot {
 
   private async kickUser(member: GuildMember, keywords: string[]): Promise<void> {
     try {
-      if (!member.kickable) {
-        console.log(`⚠️  Cannot kick ${member.user.username} - insufficient permissions`);
+      // Disconnect user from voice channel
+      if (!member.voice.channel) {
+        console.log(`⚠️  ${member.user.username} is not in a voice channel`);
         return;
       }
 
-      await member.kick(`Talking about sports: ${keywords.join(', ')}`);
-      console.log(`👢 Kicked ${member.user.username} for talking about sports`);
+      await member.voice.disconnect(`Talking about sports: ${keywords.join(', ')}`);
+      console.log(`👢 Disconnected ${member.user.username} from voice channel for talking about sports`);
 
-      // Reset warnings after kick
+      // Reset warnings after disconnect
       this.userWarnings.delete(member.id);
     } catch (error) {
-      console.error(`Failed to kick ${member.user.username}:`, error);
+      console.error(`Failed to disconnect ${member.user.username}:`, error);
     }
   }
 

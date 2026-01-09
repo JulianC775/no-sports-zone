@@ -47,12 +47,12 @@ npm install
 
 This will automatically check if FFmpeg is installed. If not, you'll see instructions for your platform.
 
-3. Download the Vosk speech recognition model (~40MB):
+3. Download the Vosk speech recognition model (~128MB):
 ```bash
 npm run setup
 ```
 
-This will automatically download the English language model. It only needs to be done once.
+This will automatically download the high-accuracy English language model. It only needs to be done once.
 
 > **Note**: You can run `npm run check` at any time to verify your system has all required dependencies.
 
@@ -148,9 +148,9 @@ Vosk is a free, offline speech recognition toolkit that:
 - Works offline (no internet required after setup)
 - Supports multiple languages
 - Is lightweight and fast
-- Has good accuracy for English
+- Has excellent accuracy for English
 
-The small English model is only ~40MB and provides excellent results for this use case.
+This bot uses the `vosk-model-en-us-0.22-lgraph` model (~128MB) which provides high accuracy for conversational speech and sports terminology.
 
 ## Permissions Required
 
@@ -182,21 +182,18 @@ The bot needs these Discord permissions:
 - Bot cannot kick server administrators or owners
 
 **Poor transcription accuracy:**
-- The small model (~40MB) prioritizes speed over accuracy
-- For **significantly better accuracy**, download a larger model:
+- This bot uses a high-accuracy model, but for even better results:
   1. Visit [alphacephei.com/vosk/models](https://alphacephei.com/vosk/models)
-  2. Download `vosk-model-en-us-0.22` (~1.8GB) or `vosk-model-en-us-0.42-gigaspeech` (~2.3GB)
+  2. Download `vosk-model-en-us-0.42-gigaspeech` (~2.3GB) for the best accuracy
   3. Extract it to the `models/` directory
   4. Update the model path in [src/audioProcessor.ts:15](src/audioProcessor.ts#L15)
-  5. Change: `'vosk-model-small-en-us-0.15'` → `'vosk-model-en-us-0.22'`
-
-  The larger models provide **much better** recognition of casual speech and sports terminology.
+  5. Change: `'vosk-model-en-us-0.22-lgraph'` → `'vosk-model-en-us-0.42-gigaspeech'`
 
 ## System Requirements
 
 - **CPU**: Any modern processor (transcription happens in real-time)
-- **RAM**: ~200MB for the model + normal Node.js overhead
-- **Disk**: ~100MB (40MB for model, rest for dependencies)
+- **RAM**: ~300MB for the model + normal Node.js overhead
+- **Disk**: ~200MB (128MB for model, rest for dependencies)
 - **Network**: Only needed for Discord connection (not for transcription)
 
 ## License
