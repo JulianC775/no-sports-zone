@@ -33,6 +33,8 @@ class NoSportsZoneBot {
   private activeConnections: Map<string, VoiceConnection>;
   private userWarnings: Map<string, number>;
   private monitoredUsers: Set<string>;
+  private userCooldowns: Map<string, number>; // userId -> timestamp when they can be monitored again
+  private readonly COOLDOWN_MS = 10000; // 10 seconds cooldown after rejoining
 
   constructor() {
     this.client = new Client({
@@ -49,6 +51,7 @@ class NoSportsZoneBot {
     this.activeConnections = new Map();
     this.userWarnings = new Map();
     this.monitoredUsers = new Set();
+    this.userCooldowns = new Map();
 
     this.setupEventHandlers();
   }
@@ -135,18 +138,48 @@ class NoSportsZoneBot {
 
     // User joined a voice channel
     if (!oldState.channel && newState.channel) {
+      const userId = newState.member?.user.id;
       console.log(`User ${newState.member?.user.username} joined ${newState.channel.name}`);
+
+      // Check if user is on cooldown
+      if (userId && this.userCooldowns.has(userId)) {
+        const cooldownEnd = this.userCooldowns.get(userId)!;
+        const now = Date.now();
+        if (now < cooldownEnd) {
+          const remainingSeconds = Math.ceil((cooldownEnd - now) / 1000);
+          console.log(`⏳ ${newState.member?.user.username} on cooldown (${remainingSeconds}s remaining)`);
+          // Set timer to start monitoring after cooldown
+          setTimeout(() => {
+            this.userCooldowns.delete(userId);
+            const connection = this.activeConnections.get(newState.guild.id);
+            if (connection && newState.member?.voice.channel) {
+              console.log(`✅ Cooldown ended, now monitoring ${newState.member?.user.username}`);
+              this.monitorUser(connection, newState.member);
+            }
+          }, cooldownEnd - now);
+          return;
+        } else {
+          // Cooldown expired
+          this.userCooldowns.delete(userId);
+        }
+      }
 
       // If bot is already in the channel, start monitoring this user
       const connection = this.activeConnections.get(newState.guild.id);
-      if (connection && newState.member?.user.id !== botId) {
+      if (connection && userId !== botId) {
         this.monitorUser(connection, newState.member!);
       }
     }
 
     // User left a voice channel
     if (oldState.channel && !newState.channel) {
+      const userId = oldState.member?.user.id;
       console.log(`User ${oldState.member?.user.username} left ${oldState.channel.name}`);
+
+      // Clear warnings when user leaves
+      if (userId) {
+        this.userWarnings.delete(userId);
+      }
     }
 
     // Bot joined a channel (only if not already connected)
@@ -249,6 +282,11 @@ class NoSportsZoneBot {
 
       await member.voice.disconnect(`Talking about sports: ${keywords.join(', ')}`);
       console.log(`👢 Disconnected ${member.user.username} from voice channel for talking about sports`);
+
+      // Set cooldown for rejoining (prevents instant re-kick)
+      const cooldownEnd = Date.now() + this.COOLDOWN_MS;
+      this.userCooldowns.set(member.id, cooldownEnd);
+      console.log(`⏳ ${member.user.username} has ${this.COOLDOWN_MS / 1000}s cooldown before monitoring resumes`);
 
       // Reset warnings after disconnect
       this.userWarnings.delete(member.id);
