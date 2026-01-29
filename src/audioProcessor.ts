@@ -176,6 +176,12 @@ export class AudioProcessor {
             '-ar', '48000',
             '-ac', '2',
             '-i', filename,
+            '-af', [
+              'highpass=f=200',        // Cut rumble/hum below 200Hz
+              'lowpass=f=3000',        // Cut hiss above 3kHz (speech lives in 200-3000Hz)
+              'afftdn=nf=-25',         // FFT-based noise reduction
+              'acompressor=threshold=0.02:ratio=9:attack=5:release=50', // Gate out quiet noise
+            ].join(','),
             '-f', 's16le',
             '-ar', '16000',
             '-ac', '1',

@@ -6,7 +6,7 @@ export class SportsDetector {
       // General sports terms
       'football', 'soccer', 'basketball', 'baseball', 'hockey', 'tennis',
       'golf', 'cricket', 'rugby', 'volleyball', 'boxing', 'wrestling',
-      'mma', 'ufc', 'nfl', 'nba', 'mlb', 'nhl', 'fifa',
+      'mma', 'ufc', 'nfl', 'nba', 'mlb', 'nhl', 'fifa', 'ball', 
 
       // Common sports phrases
       'game', 'match', 'tournament', 'championship', 'playoffs', 'season',
