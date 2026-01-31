@@ -15,6 +15,7 @@ export class AudioProcessor {
   private audioDir = './audio_recordings';
   private modelPath = path.join(__dirname, '..', 'models', 'vosk-model-en-us-0.22-lgraph');
   private processingQueue: Set<string> = new Set();
+  private activeUsers: Set<string> = new Set(); // Track users currently being processed
   private readonly MAX_CONCURRENT = 5;
   private readonly MIN_AUDIO_BYTES = 2048;
   private readonly MIN_AUDIO_DURATION_MS = 500;
@@ -43,12 +44,18 @@ export class AudioProcessor {
     user: User,
     onTranscription: (userId: string, username: string, text: string) => void
   ): Promise<void> {
+    // Skip if this user already has audio being processed
+    if (this.activeUsers.has(user.id)) {
+      return;
+    }
+
     // Limit concurrent processing to prevent crashes
     if (this.processingQueue.size >= this.MAX_CONCURRENT) {
       console.log(`⏸️  Queue full, skipping ${user.username}`);
       return;
     }
 
+    this.activeUsers.add(user.id);
     const processingKey = `${user.id}-${Date.now()}`;
     this.processingQueue.add(processingKey);
     console.log(`🎧 Capturing audio from ${user.username}`);
@@ -150,155 +157,139 @@ export class AudioProcessor {
     } finally {
       clearTimeout(timeoutId);
       this.processingQueue.delete(processingKey);
+      this.activeUsers.delete(user.id);
     }
   }
 
   private transcriptionLock: Promise<any> = Promise.resolve();
 
-  private async transcribeAudio(filename: string): Promise<string> {
-    // Queue transcription to prevent concurrent Vosk usage (causes segfaults)
-    const transcribe = async (): Promise<string> => {
-      return new Promise<string>((resolve, reject) => {
-        let recognizer: vosk.Recognizer | null = null;
+  // Run FFmpeg conversion (can run in parallel)
+  private convertAudio(filename: string): Promise<string | null> {
+    return new Promise((resolve) => {
+      const convertedFile = `${filename}.converted.pcm`;
 
-        try {
-          // Create recognizer for 16kHz mono audio (Vosk requirement)
-          recognizer = new vosk.Recognizer({
-            model: this.model,
-            sampleRate: 16000
-          });
+      const ffmpegProcess = spawn('ffmpeg', [
+        '-f', 's16le',
+        '-ar', '48000',
+        '-ac', '2',
+        '-i', filename,
+        '-af', [
+          // Stage 1: Bandpass - keep speech frequencies
+          'highpass=f=80',
+          'lowpass=f=7000',
+          // Stage 2: FFT noise reduction with adaptive tracking
+          'afftdn=nf=-25:nt=w',
+          // Stage 3: Speech EQ - cut mud, boost presence/consonants
+          'equalizer=f=250:t=q:w=1:g=-6',
+          'equalizer=f=2500:t=q:w=1.5:g=3',
+          'equalizer=f=5000:t=q:w=1.5:g=2',
+          // Stage 4: Noise gate + compressor with makeup gain
+          'agate=threshold=0.01:ratio=2:attack=5:release=50',
+          'acompressor=threshold=0.03:ratio=6:attack=10:release=100:makeup=2',
+          // Stage 5: Dynamic volume normalization
+          'dynaudnorm=p=0.9:s=5',
+        ].join(','),
+        '-f', 's16le',
+        '-ar', '16000',
+        '-ac', '1',
+        convertedFile,
+        '-y'
+      ]);
 
-          // Use FFmpeg to convert to 16kHz mono and save to temp file
-          const convertedFile = `${filename}.converted.pcm`;
-
-          const ffmpegProcess = spawn('ffmpeg', [
-            '-f', 's16le',
-            '-ar', '48000',
-            '-ac', '2',
-            '-i', filename,
-            '-af', [
-              'highpass=f=200',        // Cut rumble/hum below 200Hz
-              'lowpass=f=3000',        // Cut hiss above 3kHz (speech lives in 200-3000Hz)
-              'afftdn=nf=-25',         // FFT-based noise reduction
-              'acompressor=threshold=0.02:ratio=9:attack=5:release=50', // Gate out quiet noise
-            ].join(','),
-            '-f', 's16le',
-            '-ar', '16000',
-            '-ac', '1',
-            convertedFile,
-            '-y' // Overwrite output file
-          ]);
-
-          let transcription = '';
-
-          ffmpegProcess.on('error', (err) => {
-            console.log(`   ⚠️  FFmpeg spawn error: ${err.message}`);
-            if (recognizer) {
-              recognizer.free();
-              recognizer = null;
-            }
-            reject(err);
-          });
-
-          ffmpegProcess.stderr.on('data', (data) => {
-            // FFmpeg outputs to stderr, ignore it unless we need to debug
-            // console.log(`FFmpeg: ${data.toString()}`);
-          });
-
-          ffmpegProcess.on('close', (code) => {
-            if (code !== 0) {
-              console.log(`   ⚠️  FFmpeg exited with code ${code}`);
-              if (recognizer) {
-                recognizer.free();
-                recognizer = null;
-              }
-              resolve('');
-              return;
-            }
-            // Now read the converted file and process it with Vosk
-            try {
-              if (!existsSync(convertedFile)) {
-                console.log(`   ⚠️  Converted file not created`);
-                resolve('');
-                return;
-              }
-
-              const audioData = readFileSync(convertedFile);
-              console.log(`   📦 Reading ${audioData.length} bytes of converted audio`);
-
-              // Process in chunks
-              const chunkSize = 8192;
-              let offset = 0;
-              let chunksProcessed = 0;
-
-              while (offset < audioData.length) {
-                const end = Math.min(offset + chunkSize, audioData.length);
-                const chunk = audioData.slice(offset, end);
-                chunksProcessed++;
-
-                if (recognizer && recognizer.acceptWaveform(chunk)) {
-                  const resultStr = recognizer.result();
-                  if (resultStr && resultStr !== '[object Object]') {
-                    const result = JSON.parse(resultStr);
-                    if (result.text) {
-                      transcription += result.text + ' ';
-                    }
-                  }
-                }
-                offset = end;
-              }
-
-              console.log(`   📦 Processed ${chunksProcessed} audio chunks`);
-
-              // Get final result
-              if (recognizer) {
-                const finalResult = recognizer.finalResult();
-                console.log(`   🔍 Final result: ${JSON.stringify(finalResult)?.substring(0, 100)}`);
-                if (finalResult !== null && typeof finalResult === 'object') {
-                  const result = finalResult as Record<string, any>;
-                  if ('text' in result && typeof result.text === 'string') {
-                    transcription += result.text;
-                  }
-                }
-                recognizer.free();
-                recognizer = null;
-              }
-
-              // Clean up converted file
-              try {
-                unlinkSync(convertedFile);
-              } catch {}
-
-              resolve(transcription.trim());
-            } catch (e: any) {
-              console.log(`   ⚠️  Processing error: ${e.message}`);
-              if (recognizer) {
-                recognizer.free();
-                recognizer = null;
-              }
-              // Clean up converted file
-              try {
-                if (existsSync(convertedFile)) {
-                  unlinkSync(convertedFile);
-                }
-              } catch {}
-              resolve('');
-            }
-          });
-        } catch (error) {
-          if (recognizer) {
-            try {
-              recognizer.free();
-            } catch {}
-          }
-          console.error('Transcription error:', error);
-          resolve('');
-        }
+      ffmpegProcess.on('error', (err) => {
+        console.log(`   ⚠️  FFmpeg spawn error: ${err.message}`);
+        resolve(null);
       });
+
+      ffmpegProcess.stderr.on('data', () => {});
+
+      ffmpegProcess.on('close', (code) => {
+        if (code !== 0) {
+          console.log(`   ⚠️  FFmpeg exited with code ${code}`);
+          resolve(null);
+          return;
+        }
+        resolve(convertedFile);
+      });
+    });
+  }
+
+  // Run Vosk recognition on converted audio (must be serialized)
+  private recognizeAudio(convertedFile: string): string {
+    let recognizer: vosk.Recognizer | null = null;
+    try {
+      recognizer = new vosk.Recognizer({
+        model: this.model,
+        sampleRate: 16000
+      });
+
+      const audioData = readFileSync(convertedFile);
+      console.log(`   📦 Reading ${audioData.length} bytes of converted audio`);
+
+      let transcription = '';
+      const chunkSize = 8192;
+      let offset = 0;
+      let chunksProcessed = 0;
+
+      while (offset < audioData.length) {
+        const end = Math.min(offset + chunkSize, audioData.length);
+        const chunk = audioData.subarray(offset, end);
+        chunksProcessed++;
+
+        if (recognizer.acceptWaveform(chunk)) {
+          const resultStr = recognizer.result();
+          if (resultStr && resultStr !== '[object Object]') {
+            const result = JSON.parse(resultStr);
+            if (result.text) {
+              transcription += result.text + ' ';
+            }
+          }
+        }
+        offset = end;
+      }
+
+      console.log(`   📦 Processed ${chunksProcessed} audio chunks`);
+
+      const finalResult = recognizer.finalResult();
+      console.log(`   🔍 Final result: ${JSON.stringify(finalResult)?.substring(0, 100)}`);
+      if (finalResult !== null && typeof finalResult === 'object') {
+        const result = finalResult as Record<string, any>;
+        if ('text' in result && typeof result.text === 'string') {
+          transcription += result.text;
+        }
+      }
+
+      recognizer.free();
+      return transcription.trim();
+    } catch (e: any) {
+      console.log(`   ⚠️  Recognition error: ${e.message}`);
+      if (recognizer) {
+        try { recognizer.free(); } catch {}
+      }
+      return '';
+    }
+  }
+
+  private async transcribeAudio(filename: string): Promise<string> {
+    // Step 1: Convert audio with FFmpeg (runs in parallel, not serialized)
+    const convertedFile = await this.convertAudio(filename);
+    if (!convertedFile || !existsSync(convertedFile)) {
+      return '';
+    }
+
+    // Step 2: Run Vosk recognition (serialized to prevent segfaults)
+    const recognize = () => {
+      try {
+        const text = this.recognizeAudio(convertedFile);
+        try { unlinkSync(convertedFile); } catch {}
+        return text;
+      } catch {
+        try { if (existsSync(convertedFile)) unlinkSync(convertedFile); } catch {}
+        return '';
+      }
     };
 
-    // Serialize transcription to prevent concurrent Vosk access
-    const result = await (this.transcriptionLock = this.transcriptionLock.then(() => transcribe()));
+    const result = await (this.transcriptionLock = this.transcriptionLock.then(() => recognize()));
     return result;
   }
 
