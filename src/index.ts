@@ -297,6 +297,7 @@ class NoSportsZoneBot {
 
   async start(): Promise<void> {
     try {
+      await this.audioProcessor.init();
       await this.client.login(config.discordToken);
     } catch (error) {
       console.error('Failed to start bot:', error);

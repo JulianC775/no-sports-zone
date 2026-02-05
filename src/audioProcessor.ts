@@ -1,42 +1,42 @@
-import { VoiceConnection, VoiceReceiver, EndBehaviorType } from '@discordjs/voice';
+import { VoiceReceiver, EndBehaviorType } from '@discordjs/voice';
 import { User } from 'discord.js';
 import { createWriteStream, mkdirSync, existsSync, unlinkSync, statSync, readFileSync } from 'fs';
 import { pipeline } from 'stream';
 import { promisify } from 'util';
 import { spawn } from 'child_process';
 import * as prism from 'prism-media';
-import * as vosk from 'vosk';
 import * as path from 'path';
 
 const pipelineAsync = promisify(pipeline);
 
 export class AudioProcessor {
-  private model: vosk.Model;
+  private transcriber: any = null;
   private audioDir = './audio_recordings';
-  private modelPath = path.join(__dirname, '..', 'models', 'vosk-model-en-us-0.22-lgraph');
   private processingQueue: Set<string> = new Set();
-  private activeUsers: Set<string> = new Set(); // Track users currently being processed
+  private activeUsers: Set<string> = new Set();
   private readonly MAX_CONCURRENT = 5;
   private readonly MIN_AUDIO_BYTES = 2048;
   private readonly MIN_AUDIO_DURATION_MS = 500;
-  private readonly PROCESSING_TIMEOUT_MS = 15000;
-  private readonly MIN_ENERGY = 100; // Lowered from 500 to capture quieter speech
+  private readonly PROCESSING_TIMEOUT_MS = 30000;
+  private readonly MIN_ENERGY = 100;
 
   constructor() {
-    // Check if model exists
-    if (!existsSync(this.modelPath)) {
-      console.error('❌ Vosk model not found!');
-      console.error('   Please run: npm run setup');
-      process.exit(1);
-    }
-
-    console.log('📚 Loading Vosk speech recognition model...');
-    this.model = new vosk.Model(this.modelPath);
-    console.log('✅ Model loaded successfully!');
-
     if (!existsSync(this.audioDir)) {
       mkdirSync(this.audioDir, { recursive: true });
     }
+  }
+
+  async init(): Promise<void> {
+    console.log('📚 Loading Whisper base speech recognition model...');
+    console.log('   (First run will download ~150MB model)');
+
+    const { pipeline: transformersPipeline } = await import('@xenova/transformers');
+    this.transcriber = await transformersPipeline(
+      'automatic-speech-recognition',
+      'Xenova/whisper-base.en',
+    );
+
+    console.log('✅ Whisper model loaded successfully!');
   }
 
   async setupUserAudioCapture(
@@ -44,12 +44,10 @@ export class AudioProcessor {
     user: User,
     onTranscription: (userId: string, username: string, text: string) => void
   ): Promise<void> {
-    // Skip if this user already has audio being processed
     if (this.activeUsers.has(user.id)) {
       return;
     }
 
-    // Limit concurrent processing to prevent crashes
     if (this.processingQueue.size >= this.MAX_CONCURRENT) {
       console.log(`⏸️  Queue full, skipping ${user.username}`);
       return;
@@ -60,7 +58,6 @@ export class AudioProcessor {
     this.processingQueue.add(processingKey);
     console.log(`🎧 Capturing audio from ${user.username}`);
 
-    // Add timeout to auto-cleanup stuck processing
     const timeoutId: any = setTimeout(() => {
       if (this.processingQueue.has(processingKey)) {
         console.log(`⏱️  Processing timeout for ${user.username}, cleaning up`);
@@ -71,16 +68,14 @@ export class AudioProcessor {
     const opusStream = receiver.subscribe(user.id, {
       end: {
         behavior: EndBehaviorType.AfterSilence,
-        duration: 1000, // 1 second of silence to end capture (was 3000)
+        duration: 1000,
       },
     });
 
-    // Increase max listeners to prevent warnings
     opusStream.setMaxListeners(20);
 
     const filename = `${this.audioDir}/${user.id}-${Date.now()}.pcm`;
 
-    // Decode Opus to PCM (16-bit, 48kHz, stereo -> mono for Vosk)
     const pcmStream = new prism.opus.Decoder({
       rate: 48000,
       channels: 2,
@@ -90,35 +85,30 @@ export class AudioProcessor {
     try {
       await pipelineAsync(opusStream, pcmStream, createWriteStream(filename));
 
-      // Check if file has meaningful content
       const stats = statSync(filename);
-      const durationMs = (stats.size / 192000) * 1000; // Approximate duration (48kHz, 2ch, 16bit)
+      const durationMs = (stats.size / 192000) * 1000;
 
       console.log(`📊 Audio: ${stats.size} bytes (~${durationMs.toFixed(0)}ms)`);
 
       if (stats.size < this.MIN_AUDIO_BYTES) {
-        console.log(`⚠️  Audio too small (< ${this.MIN_AUDIO_BYTES} bytes), skipping`);
         unlinkSync(filename);
         return;
       }
 
       if (durationMs < this.MIN_AUDIO_DURATION_MS) {
-        console.log(`⚠️  Audio too short (< ${this.MIN_AUDIO_DURATION_MS}ms), skipping`);
         unlinkSync(filename);
         return;
       }
 
-      // Check audio energy to filter out silence/noise
       const energy = this.calculateAudioEnergy(filename);
       console.log(`🔊 Audio energy: ${energy.toFixed(0)} RMS`);
 
       if (energy < this.MIN_ENERGY) {
-        console.log(`⚠️  Audio energy too low (likely silence/noise), skipping`);
+        console.log(`⚠️  Audio energy too low, skipping`);
         unlinkSync(filename);
         return;
       }
 
-      // Transcribe the audio
       console.log(`🔄 Transcribing audio from ${user.username}...`);
       const text = await this.transcribeAudio(filename);
 
@@ -130,10 +120,8 @@ export class AudioProcessor {
         console.log(`❌ No transcription for ${user.username} (empty or unclear)`);
       }
 
-      // Clean up audio file
       unlinkSync(filename);
     } catch (error: any) {
-      // Ignore common voice chat errors
       const ignoredErrors = [
         'ERR_STREAM_PREMATURE_CLOSE',
         'The compressed data passed is corrupted',
@@ -148,7 +136,6 @@ export class AudioProcessor {
         console.error(`Error processing audio for ${user.username}:`, error.message);
       }
 
-      // Clean up on error
       try {
         if (existsSync(filename)) {
           unlinkSync(filename);
@@ -163,10 +150,10 @@ export class AudioProcessor {
 
   private transcriptionLock: Promise<any> = Promise.resolve();
 
-  // Run FFmpeg conversion (can run in parallel)
+  // Convert PCM to WAV with noise reduction (runs in parallel)
   private convertAudio(filename: string): Promise<string | null> {
     return new Promise((resolve) => {
-      const convertedFile = `${filename}.converted.pcm`;
+      const convertedFile = `${filename}.converted.wav`;
 
       const ffmpegProcess = spawn('ffmpeg', [
         '-f', 's16le',
@@ -189,7 +176,6 @@ export class AudioProcessor {
           // Stage 5: Dynamic volume normalization
           'dynaudnorm=p=0.9:s=5',
         ].join(','),
-        '-f', 's16le',
         '-ar', '16000',
         '-ac', '1',
         convertedFile,
@@ -214,77 +200,57 @@ export class AudioProcessor {
     });
   }
 
-  // Run Vosk recognition on converted audio (must be serialized)
-  private recognizeAudio(convertedFile: string): string {
-    let recognizer: vosk.Recognizer | null = null;
-    try {
-      recognizer = new vosk.Recognizer({
-        model: this.model,
-        sampleRate: 16000
-      });
+  // Read WAV file and return Float32Array of audio samples
+  private readWavAsFloat32(filepath: string): Float32Array {
+    const buffer = readFileSync(filepath);
 
-      const audioData = readFileSync(convertedFile);
-      console.log(`   📦 Reading ${audioData.length} bytes of converted audio`);
+    // WAV header is 44 bytes, audio data starts after
+    const headerSize = 44;
+    const pcmData = buffer.subarray(headerSize);
 
-      let transcription = '';
-      const chunkSize = 8192;
-      let offset = 0;
-      let chunksProcessed = 0;
-
-      while (offset < audioData.length) {
-        const end = Math.min(offset + chunkSize, audioData.length);
-        const chunk = audioData.subarray(offset, end);
-        chunksProcessed++;
-
-        if (recognizer.acceptWaveform(chunk)) {
-          const resultStr = recognizer.result();
-          if (resultStr && resultStr !== '[object Object]') {
-            const result = JSON.parse(resultStr);
-            if (result.text) {
-              transcription += result.text + ' ';
-            }
-          }
-        }
-        offset = end;
-      }
-
-      console.log(`   📦 Processed ${chunksProcessed} audio chunks`);
-
-      const finalResult = recognizer.finalResult();
-      console.log(`   🔍 Final result: ${JSON.stringify(finalResult)?.substring(0, 100)}`);
-      if (finalResult !== null && typeof finalResult === 'object') {
-        const result = finalResult as Record<string, any>;
-        if ('text' in result && typeof result.text === 'string') {
-          transcription += result.text;
-        }
-      }
-
-      recognizer.free();
-      return transcription.trim();
-    } catch (e: any) {
-      console.log(`   ⚠️  Recognition error: ${e.message}`);
-      if (recognizer) {
-        try { recognizer.free(); } catch {}
-      }
-      return '';
+    // Convert 16-bit PCM to Float32 (-1.0 to 1.0)
+    const float32 = new Float32Array(pcmData.length / 2);
+    for (let i = 0; i < float32.length; i++) {
+      const sample = pcmData.readInt16LE(i * 2);
+      float32[i] = sample / 32768;
     }
+
+    return float32;
   }
 
   private async transcribeAudio(filename: string): Promise<string> {
-    // Step 1: Convert audio with FFmpeg (runs in parallel, not serialized)
-    const convertedFile = await this.convertAudio(filename);
-    if (!convertedFile || !existsSync(convertedFile)) {
+    // Step 1: Convert to WAV with noise reduction (parallel)
+    const wavFile = await this.convertAudio(filename);
+    if (!wavFile || !existsSync(wavFile)) {
       return '';
     }
 
-    // Step 2: Run Vosk recognition (serialized to prevent segfaults)
-    const recognize = () => {
+    // Step 2: Run Whisper transcription (serialized to manage memory)
+    const recognize = async () => {
       try {
-        const text = this.recognizeAudio(convertedFile);
-        try { unlinkSync(convertedFile); } catch {}
+        if (!this.transcriber) {
+          console.log('   ⚠️  Whisper not initialized');
+          return '';
+        }
+
+        // Read WAV as Float32Array (Node.js has no AudioContext)
+        const audioData = this.readWavAsFloat32(wavFile);
+        console.log(`   📦 Audio: ${audioData.length} samples`);
+
+        const result = await this.transcriber(audioData, {
+          language: 'english',
+          task: 'transcribe',
+          sampling_rate: 16000,
+        });
+
+        try { unlinkSync(wavFile); } catch {}
+
+        const text = result?.text?.trim() || '';
+        console.log(`   🔍 Whisper result: "${text}"`);
         return text;
-      } catch {
-        try { if (existsSync(convertedFile)) unlinkSync(convertedFile); } catch {}
+      } catch (e: any) {
+        console.log(`   ⚠️  Whisper error: ${e.message}`);
+        try { if (existsSync(wavFile)) unlinkSync(wavFile); } catch {}
         return '';
       }
     };
@@ -302,13 +268,10 @@ export class AudioProcessor {
       sumSquares += samples[i] * samples[i];
     }
 
-    return Math.sqrt(sumSquares / samples.length); // RMS
+    return Math.sqrt(sumSquares / samples.length);
   }
 
   destroy(): void {
-    // Clean up model resources
-    if (this.model) {
-      this.model.free();
-    }
+    // Whisper/transformers handles its own cleanup
   }
 }
