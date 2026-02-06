@@ -15,10 +15,10 @@ export class AudioProcessor {
   private processingQueue: Set<string> = new Set();
   private activeUsers: Set<string> = new Set();
   private readonly MAX_CONCURRENT = 5;
-  private readonly MIN_AUDIO_BYTES = 2048;
-  private readonly MIN_AUDIO_DURATION_MS = 500;
+  private readonly MIN_AUDIO_BYTES = 1024;      // Lower threshold to catch shorter speech
+  private readonly MIN_AUDIO_DURATION_MS = 300; // Shorter minimum duration
   private readonly PROCESSING_TIMEOUT_MS = 30000;
-  private readonly MIN_ENERGY = 100;
+  private readonly MIN_ENERGY = 50;             // More sensitive to quieter speech
 
   constructor() {
     if (!existsSync(this.audioDir)) {
@@ -68,7 +68,7 @@ export class AudioProcessor {
     const opusStream = receiver.subscribe(user.id, {
       end: {
         behavior: EndBehaviorType.AfterSilence,
-        duration: 1000,
+        duration: 800, // Slightly faster cutoff for snappier response
       },
     });
 
@@ -161,20 +161,19 @@ export class AudioProcessor {
         '-ac', '2',
         '-i', filename,
         '-af', [
-          // Stage 1: Bandpass - keep speech frequencies
-          'highpass=f=80',
-          'lowpass=f=7000',
-          // Stage 2: FFT noise reduction with adaptive tracking
-          'afftdn=nf=-25:nt=w',
-          // Stage 3: Speech EQ - cut mud, boost presence/consonants
-          'equalizer=f=250:t=q:w=1:g=-6',
-          'equalizer=f=2500:t=q:w=1.5:g=3',
-          'equalizer=f=5000:t=q:w=1.5:g=2',
-          // Stage 4: Noise gate + compressor with makeup gain
-          'agate=threshold=0.01:ratio=2:attack=5:release=50',
-          'acompressor=threshold=0.03:ratio=6:attack=10:release=100:makeup=2',
-          // Stage 5: Dynamic volume normalization
-          'dynaudnorm=p=0.9:s=5',
+          // Stage 1: Bandpass - keep speech frequencies (wider range for Whisper)
+          'highpass=f=60',
+          'lowpass=f=8000',
+          // Stage 2: Gentle noise reduction (less aggressive to preserve speech)
+          'afftdn=nf=-20:nt=w:om=o',
+          // Stage 3: Speech clarity EQ
+          'equalizer=f=200:t=q:w=1:g=-3',   // Slight mud cut
+          'equalizer=f=3000:t=q:w=2:g=4',   // Presence boost for clarity
+          'equalizer=f=6000:t=q:w=1.5:g=2', // Air/consonants
+          // Stage 4: Gentle compression (preserve dynamics)
+          'acompressor=threshold=0.05:ratio=4:attack=10:release=100:makeup=3',
+          // Stage 5: Normalize volume
+          'loudnorm=I=-16:TP=-1.5:LRA=11',
         ].join(','),
         '-ar', '16000',
         '-ac', '1',
